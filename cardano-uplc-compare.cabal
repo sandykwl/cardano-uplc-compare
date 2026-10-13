@@ -1,0 +1,36 @@
+cabal-version: 3.0
+name:          cardano-uplc-compare
+version:       0
+synopsis:      Runs cardano-uplc and plutus-core on the same inputs and reports any difference
+license:       MIT
+license-file:  LICENSE
+build-type:    Simple
+
+executable cardano-uplc-compare
+  main-is:          Main.hs
+  hs-source-dirs:   src
+  other-modules:
+    Bits
+    Cbor
+    Convert
+    Gen
+    Value
+  default-language: GHC2021
+  default-extensions:
+    DerivingStrategies
+    LambdaCase
+  ghc-options:      -Wall -O1
+  build-depends:
+    , base
+    , bytestring
+    , cardano-uplc
+    , cborg
+    , containers
+    , directory
+    , filepath
+    , plutus-core
+    , plutus-core:flat
+    , QuickCheck
+    , serialise
+    , text
+    , vector
