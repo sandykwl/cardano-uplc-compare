@@ -1,4 +1,5 @@
 {-# LANGUAGE GADTs #-}
+{-# LANGUAGE PatternSynonyms #-}
 
 {- | cardano-uplc's CEK machine against plutus-core's, on generated terms.
 
@@ -7,13 +8,18 @@ fail the same way, with the same offending value where one is reported. The
 terms use only what cardano-uplc's machine runs: variables, lambdas,
 application, delay, force, simple constants and error. A few hand-built terms
 return closures with constr and case in their bodies, never run, so discharge
-of those is compared too. Untyped terms can loop
-forever and cardano-uplc's machine has no budget, so plutus-core runs first
-with one, and a term it does not finish within that budget is skipped.
+of those is compared too. Untyped terms can loop forever and cardano-uplc's
+machine has no budget, so plutus-core runs first with one, and a term it does
+not finish within that budget is skipped.
+
+compareUnder is the same comparison under a chosen semantics variant, which
+the builtin families use.
 -}
-module Eval (evalReport) where
+module Eval (evalReport, builtinToPlutus, Outcome (..), compareUnder, toPlutusVariant) where
 
 import Cardano.UPLC.Constant (Constant (..))
+import Cardano.UPLC.Ty (Ty (TyBool, TyInteger))
+import Cardano.UPLC.Builtin qualified as U
 import Cardano.UPLC.Machine qualified as U
 import Cardano.UPLC.Name qualified as U
 import Cardano.UPLC.Term qualified as U
@@ -23,12 +29,13 @@ import Data.Map.Strict qualified as Map
 import Data.Vector qualified as Vector
 import Data.Text qualified as T
 import Data.Word (Word64)
-import PlutusCore.Default (DefaultFun, DefaultUni (..))
-import PlutusCore.Evaluation.Machine.ExBudgetingDefaults (defaultCekParametersForTesting)
+import PlutusCore.Default (BuiltinSemanticsVariant (..), DefaultFun, DefaultUni (..), pattern DefaultUniList)
+import PlutusCore.Evaluation.Machine.ExBudgetingDefaults (defaultCekParametersForVariant)
 import PlutusCore.Evaluation.Machine.Exception (MachineError (..))
 import System.Timeout (timeout)
 import Test.QuickCheck (Gen, choose, elements, frequency, generate, oneof, resize, sized, vectorOf)
 import Universe (Esc, Some (..), ValueOf (..))
+import Convert (fromPlutusValue, toPlutusValue)
 import UntypedPlutusCore qualified as P
 import UntypedPlutusCore.Evaluation.Machine.Cek qualified as Cek
 
@@ -81,11 +88,22 @@ toPlutus = \case
   U.Force _ body -> P.Force () (toPlutus body)
   U.Error _ -> P.Error ()
   U.Constant _ c -> P.Constant () (constantToPlutus c)
+  U.Builtin _ f -> P.Builtin () (builtinToPlutus f)
   U.Constr _ i fields -> P.Constr () i (map toPlutus fields)
   U.Case _ s branches -> P.Case () (toPlutus s) (fmap toPlutus branches)
-  t -> error ("not generated: " <> show t)
   where
     name i = P.NamedDeBruijn (T.pack "i") (P.Index i)
+
+-- plutus-core declares its builtins in another order, so its Enum index is not
+-- the flat tag. The constructors have the same names, and this package has none
+-- plutus-core lacks.
+builtinToPlutus :: U.DefaultFun -> DefaultFun
+builtinToPlutus f = Map.findWithDefault (error ("no such builtin in plutus-core: " <> show f)) (show f) theirsByName
+  where
+    theirsByName = Map.fromList [(show g, g) | g <- [minBound .. maxBound]]
+
+oursByName :: Map.Map String U.DefaultFun
+oursByName = Map.fromList [(show f, f) | f <- [minBound .. maxBound]]
 
 constantToPlutus :: Constant -> Some (ValueOf DefaultUni)
 constantToPlutus = \case
@@ -93,6 +111,10 @@ constantToPlutus = \case
   CBool b -> Some (ValueOf DefaultUniBool b)
   CUnit -> Some (ValueOf DefaultUniUnit ())
   CByteString b -> Some (ValueOf DefaultUniByteString b)
+  CList TyInteger xs -> Some (ValueOf (DefaultUniList DefaultUniInteger) [n | CInteger n <- xs])
+  -- Arguments of the wrong type, to check both machines refuse them alike.
+  CList TyBool xs -> Some (ValueOf (DefaultUniList DefaultUniBool) [b | CBool b <- xs])
+  CValue v -> Some (ValueOf DefaultUniValue (toPlutusValue v))
   c -> error ("not generated: " <> show c)
 
 fromPlutus :: NTerm -> Maybe (U.Term U.DeBruijn ())
@@ -103,10 +125,10 @@ fromPlutus = \case
   P.Delay _ body -> U.Delay () <$> fromPlutus body
   P.Force _ body -> U.Force () <$> fromPlutus body
   P.Error _ -> Just (U.Error ())
+  P.Builtin _ f -> U.Builtin () <$> Map.lookup (show f) oursByName
   P.Constant _ (Some (ValueOf uni x)) -> U.Constant () <$> constantFromPlutus uni x
   P.Constr _ i fields -> U.Constr () i <$> traverse fromPlutus fields
   P.Case _ s branches -> U.Case () <$> fromPlutus s <*> traverse fromPlutus branches
-  _ -> Nothing
 
 constantFromPlutus :: DefaultUni (Esc a) -> a -> Maybe Constant
 constantFromPlutus uni x = case uni of
@@ -114,48 +136,96 @@ constantFromPlutus uni x = case uni of
   DefaultUniBool -> Just (CBool x)
   DefaultUniUnit -> Just CUnit
   DefaultUniByteString -> Just (CByteString x)
+  DefaultUniList DefaultUniInteger -> Just (CList TyInteger (map CInteger x))
+  DefaultUniList DefaultUniBool -> Just (CList TyBool (map CBool x))
+  DefaultUniValue -> Just (CValue (fromPlutusValue x))
   _ -> Nothing
 
--- What plutus-core's machine said, in cardano-uplc's terms. Nothing when it
--- ran out of budget or failed in a way this machine has no name for.
+-- What plutus-core's machine said, in cardano-uplc's terms. Failed (Right _)
+-- is a failure cardano-uplc has no name for.
 data Theirs = Finished (U.Term U.DeBruijn ()) | Failed (Either U.EvalError String) | OutOfBudget
 
-theirs :: U.Term U.DeBruijn () -> Theirs
-theirs t =
-  case Cek._cekReportResult (Cek.runCekDeBruijn defaultCekParametersForTesting Cek.restrictingLarge Cek.noEmitter (toPlutus t)) of
+theirs :: Cek.ExBudgetMode Cek.RestrictingSt DefaultUni DefaultFun -> U.SemanticsVariant -> U.Term U.DeBruijn () -> Theirs
+theirs mode var t =
+  case Cek._cekReportResult (Cek.runCekDeBruijn (defaultCekParametersForVariant (toPlutusVariant var)) mode Cek.noEmitter (toPlutus t)) of
     Cek.CekSuccessConstant (Some (ValueOf uni x)) -> maybe (Failed (Right "an unexpected constant")) (Finished . U.Constant ()) (constantFromPlutus uni x)
     Cek.CekSuccessNonConstant r -> maybe (Failed (Right "an unexpected term")) Finished (fromPlutus r)
     Cek.CekFailure (Cek.ErrorWithCause err cause) -> case err of
       Cek.OperationalError (Cek.CekOutOfExError _) -> OutOfBudget
-      Cek.OperationalError Cek.CekEvaluationFailure -> Failed (Left U.ErrorTerm)
+      -- The error term's cause is the term itself; a builtin's failure has the
+      -- saturated application.
+      Cek.OperationalError Cek.CekEvaluationFailure -> case cause of
+        Just (P.Error _) -> Failed (Left U.ErrorTerm)
+        _ -> withCause U.BuiltinFailure cause
       Cek.StructuralError OpenTermEvaluatedMachineError -> case cause of
         Just (P.Var _ (P.NamedDeBruijn _ (P.Index i))) -> Failed (Left (U.FreeVariable i))
         _ -> Failed (Right "a free variable with no variable as its cause")
       Cek.StructuralError NonFunctionalApplicationMachineError -> withCause U.NotAFunction cause
       Cek.StructuralError NonPolymorphicInstantiationMachineError -> withCause U.NotDelayed cause
+      Cek.StructuralError BuiltinTermArgumentExpectedMachineError -> withCause U.BuiltinNeedsArgument cause
+      Cek.StructuralError UnexpectedBuiltinTermArgumentMachineError -> withCause U.BuiltinNeedsForce cause
+      Cek.StructuralError (UnliftingMachineError _) -> withCause U.BuiltinArgumentType cause
       e -> Failed (Right (show e))
   where
     withCause k cause = maybe (Failed (Right "a failure with no cause")) (Failed . Left . k) (fromPlutus =<< cause)
 
 -- The comparison ------------------------------------------------------------
 
-data Outcome = Agree String | Skipped | Disagree String
+toPlutusVariant :: U.SemanticsVariant -> BuiltinSemanticsVariant DefaultFun
+toPlutusVariant = \case
+  U.VariantA -> DefaultFunSemanticsVariantA
+  U.VariantB -> DefaultFunSemanticsVariantB
+  U.VariantC -> DefaultFunSemanticsVariantC
+  U.VariantD -> DefaultFunSemanticsVariantD
+  U.VariantE -> DefaultFunSemanticsVariantE
+
+-- Agree carries the kind of outcome both reached.
+-- Unrun: cardano-uplc does not run this builtin yet, and plutus-core got past
+-- the point where it would.
+data Outcome = Agree String | Skipped | Disagree String | Unrun String
 
 compareMachines :: U.Term U.DeBruijn () -> IO Outcome
-compareMachines t = case theirs t of
-  OutOfBudget -> pure Skipped
-  Failed (Right why) -> pure (Disagree ("plutus-core failed in an unexpected way: " <> why))
+compareMachines = compareWith False Cek.restrictingLarge U.VariantE
+
+-- The comparison under one builtin semantics variant, with a budget far above
+-- any the chain allows, for terms that are known to finish. A term that still
+-- runs out is one the chain rejects, so cardano-uplc must not return a value
+-- for it.
+compareUnder :: U.SemanticsVariant -> U.Term U.DeBruijn () -> IO Outcome
+compareUnder = compareWith True Cek.restrictingEnormous
+
+compareWith :: Bool -> Cek.ExBudgetMode Cek.RestrictingSt DefaultUni DefaultFun -> U.SemanticsVariant -> U.Term U.DeBruijn () -> IO Outcome
+compareWith mustFail mode var t = case theirs mode var t of
+  OutOfBudget
+    | mustFail -> do
+        ours <- timeout 5000000 (evaluate (forceResult (U.evaluateWith var t)))
+        pure $ case ours of
+          Just (Right r) -> Disagree (take 600 ("plutus-core ran out of budget, cardano-uplc returned " <> show r))
+          _ -> Skipped
+    | otherwise -> pure Skipped
   expected -> do
-    -- plutus-core finished, so this machine must too; the timeout only turns a
+    -- plutus-core finished, so cardano-uplc must too; the timeout only turns a
     -- hang into a report.
-    ours <- timeout 5000000 (evaluate (forceResult (U.evaluate t)))
+    ours <- timeout 5000000 (evaluate (forceResult (U.evaluateWith var t)))
     pure $ case (ours, expected) of
       (Nothing, _) -> Disagree "cardano-uplc did not finish"
       (Just (Right r), Finished r') | r == r' -> Agree (kind r)
       (Just (Left e), Failed (Left e')) | e == e' -> Agree (head (words (show e)))
-      (Just o, _) -> Disagree ("cardano-uplc gave " <> show o <> ", plutus-core " <> describe expected)
+      (Just (Left (U.NotSupported _)), _) | not (partial expected) -> Unrun (describe expected)
+      (_, Failed (Right why)) -> Disagree ("plutus-core failed in an unexpected way: " <> why)
+      (Just o, _) -> Disagree (take 600 ("cardano-uplc gave " <> show o <> ", plutus-core " <> describe expected))
   where
-    forceResult r = length (show r) `seq` r
+    partial = \case
+      Finished r -> isBuiltinSpine r
+      _ -> False
+    isBuiltinSpine = \case
+      U.Builtin {} -> True
+      U.Apply _ g _ -> isBuiltinSpine g
+      U.Force _ g -> isBuiltinSpine g
+      _ -> False
+    -- Equality below forces the result, but a hang has to happen inside the
+    -- timeout, so the error is forced here to its constructor.
+    forceResult r = either (\e -> length (take 1 (show e))) (\x -> x `seq` 0) r `seq` r
     kind = \case
       U.Constant {} -> "a constant"
       U.LamAbs {} -> "a lambda"
@@ -182,10 +252,11 @@ evalReport n = do
         ]
       terms = U.Apply () selfApply selfApply : unrun <> generated
   outcomes <- mapM (\t -> (,) t <$> compareMachines t) terms
-  let agree = length [() | (_, Agree _) <- outcomes]
+  let notRun = [(t, "not run by cardano-uplc: " <> w) | (t, Unrun w) <- outcomes]
+      agree = length [() | (_, Agree _) <- outcomes]
       kinds = Map.toList (Map.fromListWith (+) [(k, 1 :: Int) | (_, Agree k) <- outcomes])
       skipped = length [() | (_, Skipped) <- outcomes]
-      bad = [(t, w) | (t, Disagree w) <- outcomes]
+      bad = [(t, w) | (t, Disagree w) <- outcomes] <> notRun
   putStrLn $
     "machine, generated terms: " <> show (length terms) <> " terms, " <> show agree <> " agree, "
       <> show skipped <> " skipped for plutus-core's budget, " <> show (length bad) <> " disagreements"

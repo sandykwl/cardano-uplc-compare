@@ -20,7 +20,7 @@ index-state:
 
 constraints: plutus-core ==1.70.0.0
 
--- The codecs do not need plutus-core's crypto, and turning it off removes the
--- libsodium, secp256k1 and blst system libraries.
+-- Nothing compared here needs plutus-core's crypto, and turning it off
+-- removes the libsodium, secp256k1 and blst system libraries.
 package plutus-core
   flags: -with-crypto

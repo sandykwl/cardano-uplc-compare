@@ -14,7 +14,9 @@ executable cardano-uplc-compare
     Cbor
     Convert
     Eval
+    Family
     Gen
+    Shape
     Value
   default-language: GHC2021
   default-extensions:

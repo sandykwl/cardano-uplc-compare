@@ -35,6 +35,26 @@ machine has no budget, so plutus-core runs first, with one, and a term it does
 not finish is skipped. One looping term is always included, and the run fails
 if it is not skipped.
 
+**Builtins.** The 33 builtins cardano-uplc's machine runs, the integer,
+bytestring and bitwise ones and `ifThenElse`, are applied to arguments at the
+edges of their ranges, and each application is evaluated by both machines
+under each of plutus-core's five builtin semantics variants, A to E. The two
+must agree on the result, or on the error and the term that caused it. Most
+applications are saturated and well typed; the rest have an argument of the
+wrong type, a missing or extra force, too few or too many arguments, or an
+argument bound by a lambda. An application plutus-core cannot finish within a
+very large budget is one the chain rejects, so cardano-uplc must not return a
+value for it either.
+
+**Each builtin's forces and arity.** For every builtin cardano-uplc knows, not
+only the ones its machine runs, a grid of terms forces it up to three times,
+applies it to up to seven arguments and sometimes forces it once more. A wrong
+force count or arity moves the point where a builtin stops being a value and
+becomes an error, so the two machines would disagree somewhere on the grid.
+Where cardano-uplc does not run the builtin, it may stop with `NotSupported`
+once plutus-core would have run it. `cardano-uplc-compare shapes` runs this
+alone.
+
 For flat, when only plutus-core accepts an input, the refusal must be what
 cardano-uplc does not handle yet: builtins after tag 93. These are counted as
 known gaps, by builtin tag, and only when plutus-core's program really calls
@@ -62,13 +82,17 @@ hex. For `Data`, every one-sided acceptance is a disagreement.
 - **Terms to evaluate**, generated with variables that mostly point at an
   enclosing lambda and sometimes at index 0 or past them all, and with lambdas
   often applied straight away, so bodies run with something bound.
+- **Builtin applications**, with integers at 0, ±1, the 64-bit limits, 2^8191,
+  2^65536 and 2^262143, byte strings of length 0, 1, 64, 4096, 4097 and 65536,
+  and indices, widths and shifts on either side of the byte string's length.
+  `cardano-uplc-compare builtins N` runs this family alone.
 - **A corpus of real programs**, any directory of `.flat` files.
 
 ## Running it
 
 It needs GHC 9.6.7 and cabal. cardano-uplc is read from a checkout next to
 this one, so a comparison is always of the commit that checkout holds. It
-needs a cardano-uplc with the machine, `Cardano.UPLC.Machine`, which is on its
+needs a cardano-uplc whose machine runs the builtins, which is on its
 `cek-machine` branch:
 
 ```bash
@@ -119,8 +143,9 @@ cases:
 
 ## What it does not compare
 
-Builtins, `constr` and `case` at run time, which cardano-uplc's machine does
-not run yet, and the cost of evaluation, which it does not count.
+The other builtins, and `constr` and `case` at run time, which cardano-uplc's
+machine does not run yet. Nor the cost of evaluation: costing is outside
+cardano-uplc's scope.
 
 The reference is plutus-core 1.70.0.0, pinned with the package index in
 `cabal.project`. Moving the pin is how the comparison moves to a newer

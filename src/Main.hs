@@ -4,12 +4,16 @@ Both decoders read the same bytes and must agree on whether to accept them.
 When both accept, they must have read the same program, and re-encode it to
 the same bytes. When only plutus-core accepts, the refusal must be a known gap,
 something cardano-uplc does not handle yet; anything else is a failure.
-The machines are compared in "Eval", on terms rather than bytes.
+The machines are compared in "Eval", on terms rather than bytes, and the
+builtins in "Family" and "Shape".
 
 Usage:
-  cardano-uplc-compare [CASES]       generated and hand-built inputs, CASES
-                                     per random family (default 10000)
-  cardano-uplc-compare corpus DIR    every .flat file under DIR
+  cardano-uplc-compare [CASES]          everything, CASES per random family
+                                        (default 10000)
+  cardano-uplc-compare corpus DIR       every .flat file under DIR
+  cardano-uplc-compare builtins CASES   the builtins alone, CASES applications
+                                        of each
+  cardano-uplc-compare shapes           the builtins' forces and arities alone
 -}
 module Main (main) where
 
@@ -42,7 +46,9 @@ import Bits
 import Cbor (cborReport)
 import Convert (fromPlutusProgram, lacksBuiltin)
 import Eval (evalReport)
+import Family (familyReport)
 import Gen (Encodable (Encodable), Nested (Nested), genValue)
+import Shape (shapeReport)
 import Value (valueCases, valueReport)
 
 type Ref = P.UnrestrictedProgram P.DeBruijn DefaultUni DefaultFun ()
@@ -271,9 +277,11 @@ main :: IO ()
 main =
   getArgs >>= \case
     ["corpus", dir] -> corpus dir
+    ["builtins", s] | Just n <- readMaybe s, n > 0 -> familyReport n >>= finish
+    ["shapes"] -> shapeReport >>= finish
     [s] | Just n <- readMaybe s, n > 0 -> generated n
     [] -> generated 10000
-    _ -> putStrLn "usage: cardano-uplc-compare [CASES] | corpus DIR" >> exitFailure
+    _ -> putStrLn "usage: cardano-uplc-compare [CASES] | corpus DIR | builtins CASES | shapes" >> exitFailure
 
 finish :: Bool -> IO ()
 finish ok = do
@@ -305,4 +313,6 @@ generated n = do
   oks <- mapM (uncurry report) edgeCases
   okC <- cborReport n mutate
   okE <- evalReport n
-  finish (and (ok1 : ok2 : ok3 : ok4 : ok5 : okV : okC : okE : oks))
+  okS <- shapeReport
+  okF <- familyReport n
+  finish (and (ok1 : ok2 : ok3 : ok4 : ok5 : okV : okC : okE : okS : okF : oks))
