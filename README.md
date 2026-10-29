@@ -1,115 +1,84 @@
 # cardano-uplc-compare
 
-Runs [cardano-uplc](https://github.com/sandykwl/cardano-uplc) and plutus-core
-on the same inputs and reports any difference.
+This repository runs [cardano-uplc](https://github.com/sandykwl/cardano-uplc)
+and plutus-core on the same inputs and reports every place where they differ.
 
-cardano-uplc reads and writes Untyped Plutus Core without depending on
-plutus-core. A script's hash is taken over its bytes, so "it round-trips" is
-not enough: it has to write exactly the bytes plutus-core writes, and accept
-exactly the inputs plutus-core accepts. This tool checks that. It is a separate
-repository because it depends on plutus-core, the dependency cardano-uplc exists
-to avoid.
+cardano-uplc is a Haskell implementation of Untyped Plutus Core that does not
+depend on plutus-core. plutus-core is the implementation the Cardano network
+runs, so cardano-uplc has to behave exactly like it: write the same bytes,
+accept and refuse the same inputs, and evaluate every term to the same result.
+This repository lets anyone check that for themselves. It is kept separate
+because it depends on plutus-core, the dependency cardano-uplc exists to avoid.
 
-## What it compares
+[`docs/guide.md`](docs/guide.md) explains each comparison in more detail: what
+it does, why it is built that way, and how to read its output.
 
-**Flat programs.** For every input, both decoders read the same bytes and must
-agree on whether to accept them. When both accept, they must have read the same
-program, compared value by value with builtins matched by name, and each must
-re-encode it to the same bytes, so the encoders are compared too. Comparing
-bytes alone would miss a mistake made the same way in both directions, such as
-two builtins with swapped tags.
+## What it checks
 
-**`Data` as CBOR.** Both encoders write the same values and must produce the
-same bytes. Both decoders read the same bytes and must agree on accepting and,
-when they accept, on the value.
+**Flat programs.** Both decoders read the same bytes. They must both accept or
+both refuse. When both accept, they must have read the same program, and both
+must write it back as the same bytes. The programs are compared as values, not
+only as bytes, because a mistake made the same way in the writer and the
+reader, such as two builtins with swapped tags, would leave the bytes equal.
 
-**The ledger's `value` type.** Values from each side are written by both and
-read back by the other, and compared as values as well as bytes.
+**`Data` as CBOR.** Both encoders write the same `Data` values and must produce
+the same bytes. Both decoders read the same bytes and must agree on whether to
+accept them and, if they do, on the value.
 
-**Evaluation.** Both CEK machines run the same term and must return the same
-term, or fail the same way with the same offending value. The terms use what
-cardano-uplc's machine runs so far: variables, lambdas, application, delay,
-force, constants and `error`, plus a few returned closures with `constr` and
-`case` in their bodies, never run. A term can loop for ever and cardano-uplc's
-machine has no budget, so plutus-core runs first, with one, and a term it does
-not finish is skipped. One looping term is always included, and the run fails
-if it is not skipped.
+**The ledger's `value` type.** Values made on each side are written by both and
+read back by the other.
 
-**Builtins.** The 33 builtins cardano-uplc's machine runs, the integer,
-bytestring and bitwise ones and `ifThenElse`, are applied to arguments at the
-edges of their ranges, and each application is evaluated by both machines
-under each of plutus-core's five builtin semantics variants, A to E. The two
-must agree on the result, or on the error and the term that caused it. Most
-applications are saturated and well typed; the rest have an argument of the
-wrong type, a missing or extra force, too few or too many arguments, or an
-argument bound by a lambda. An application plutus-core cannot finish within a
-very large budget is one the chain rejects, so cardano-uplc must not return a
-value for it either.
+**Evaluation.** Both CEK machines run the same term. They must return the same
+term, or fail with the same error and the same offending term. A generated
+term can loop for ever, so plutus-core runs it first, with a budget, and a
+term it cannot finish is skipped; the guide explains how that path is tested.
 
-**Each builtin's forces and arity.** For every builtin cardano-uplc knows, not
-only the ones its machine runs, a grid of terms forces it up to three times,
-applies it to up to seven arguments and sometimes forces it once more. A wrong
-force count or arity moves the point where a builtin stops being a value and
-becomes an error, so the two machines would disagree somewhere on the grid.
-Where cardano-uplc does not run the builtin, it may stop with `NotSupported`
-once plutus-core would have run it. `cardano-uplc-compare shapes` runs this
-alone.
+**Builtins.** The 33 builtins cardano-uplc's machine runs (the integer,
+bytestring and bitwise ones, and `ifThenElse`) are applied to arguments at the
+edges of their ranges. Each application is evaluated by both machines under
+each of plutus-core's five builtin semantics variants, A to E, and the results
+must match. Some applications are deliberately wrong: an argument of the wrong
+type, a missing or extra force, too few or too many arguments.
 
-For flat, when only plutus-core accepts an input, the refusal must be what
-cardano-uplc does not handle yet: builtins after tag 93. These are counted as
-known gaps, by builtin tag, and only when plutus-core's program really calls
-the builtin. Anything else is reported as a disagreement, with the input in
-hex. For `Data`, every one-sided acceptance is a disagreement.
+**Each builtin's forces and arity.** For all 94 builtins cardano-uplc knows, a
+grid of terms forces and applies the builtin different numbers of times. Both
+machines must agree on where it stops being a value and becomes an error.
 
-## The inputs
-
-- **Generated programs and constants**, from the same generators as
-  cardano-uplc's own tests (`src/Gen.hs` is a copy).
-- **Damaged encodings**: a generated program's or value constant's bytes with a
-  bit flipped, a byte replaced, inserted, deleted or appended, or the end cut
-  off.
-- **Random bytes** after a valid version.
-- **Hand-built edge cases**, one family per reading rule: padded numbers,
-  padding and the end of input, byte-string chunking, UTF-8, every term tag,
-  every list of up to four type tags, every builtin tag, `data` constants,
-  including bytes after the value, which plutus-core reads and ignores, and
-  `value` constants that break each rule of the type.
-- **Values** from cardano-uplc's generator, and values built by plutus-core's
-  own constructors.
-- **`Data` values and bytes**: generated values, each form of the writer at
-  both sides of its boundary, inputs the reader must accept or refuse,
-  including forms plutus-core never writes, and damaged encodings.
-- **Terms to evaluate**, generated with variables that mostly point at an
-  enclosing lambda and sometimes at index 0 or past them all, and with lambdas
-  often applied straight away, so bodies run with something bound.
-- **Builtin applications**, with integers at 0, ±1, the 64-bit limits, 2^8191,
-  2^65536 and 2^262143, byte strings of length 0, 1, 64, 4096, 4097 and 65536,
-  and indices, widths and shifts on either side of the byte string's length.
-  `cardano-uplc-compare builtins N` runs this family alone.
-- **A corpus of real programs**, any directory of `.flat` files.
+When only plutus-core accepts a flat program, the reason must be one
+cardano-uplc does not cover yet: a builtin after tag 93. These are counted as
+known gaps. Every other difference is a disagreement, printed with its input.
 
 ## Running it
 
-It needs GHC 9.6.7 and cabal. cardano-uplc is read from a checkout next to
-this one, so a comparison is always of the commit that checkout holds. It
-needs a cardano-uplc whose machine runs the builtins, which is on its
-`cek-machine` branch:
+You need GHC 9.6.7 and cabal. cardano-uplc is read from a checkout next to this
+one, so the run always tests the commit that checkout holds. Its `cek-machine`
+branch has the machine and the builtins:
 
 ```bash
 git clone -b cek-machine https://github.com/sandykwl/cardano-uplc.git
-git clone <this repository> cardano-uplc-compare
+git clone https://github.com/sandykwl/cardano-uplc-compare.git
 cd cardano-uplc-compare
-cabal update                          # the index is pinned to 2026-09-24
-cabal run -w ghc-9.6.7 cardano-uplc-compare -- 10000
+cabal update                    # the package index is pinned to 2026-09-24
+cabal run -w ghc-9.6.7 cardano-uplc-compare -- 1000
 ```
 
-The first build compiles plutus-core and about 150 packages. Its crypto is
-turned off in `cabal.project`, so no system library is needed. The number is
-how many cases each random family draws; the hand-built families are always
-run whole.
+The first build compiles plutus-core and about 150 other packages, which takes
+a while. plutus-core's crypto is turned off in `cabal.project`, so no system
+library is needed.
 
-To run a corpus, give it a directory. The conformance tests in the plutus
-repository are the obvious one:
+The number is how many cases each random family draws: 1000 programs, 1000
+terms, 1000 applications of each builtin, and so on. The hand-built families
+always run in full. With no number, it draws 10000.
+
+Other ways to run it:
+
+```bash
+cabal run -w ghc-9.6.7 cardano-uplc-compare -- builtins 1000   # the builtins only
+cabal run -w ghc-9.6.7 cardano-uplc-compare -- shapes          # forces and arity only
+cabal run -w ghc-9.6.7 cardano-uplc-compare -- corpus DIR      # every .flat file under DIR
+```
+
+For a corpus, plutus's conformance tests are a good choice:
 
 ```bash
 git clone --filter=blob:none --no-checkout https://github.com/IntersectMBO/plutus.git
@@ -117,39 +86,38 @@ cd plutus && git sparse-checkout set plutus-conformance/test-cases/uplc && git c
 cabal run -w ghc-9.6.7 cardano-uplc-compare -- corpus plutus/plutus-conformance/test-cases/uplc
 ```
 
-A `.flat` file may hold the bytes themselves, as plutus's do, or the bytes
-written out in hex, as amaru's do. The run says how many files it read and how
-many were hex, and fails if it found none.
+A `.flat` file may hold raw bytes, as plutus's do, or the bytes written out in
+hex, as amaru's do.
 
-The run exits with status 1 if there is any disagreement, and prints at most
-ten of each family's.
+Each family prints one summary line and its disagreements: up to ten for most
+families, all of them for the builtins and for forces and arity. The
+last line is `RESULT: no disagreements` or `RESULT: disagreements found`, and
+in the second case the exit status is 1.
 
 ## Checking that it can fail
 
-A clean run means little unless the tool can fail. `scripts/planted-bugs.py`
-copies the package files of the cardano-uplc checkout beside this one, plants
-a known mistake in the copy, runs the comparison against it, and says which families caught it.
-It does this for fourteen mistakes, one at a time, and exits with status 1 if
-any of them is missed:
+A clean run only means something if the comparison can fail. The script
+`scripts/planted-bugs.py` plants known bugs in a copy of the cardano-uplc
+checkout, one at a time, and runs the comparison against each:
 
 ```bash
-python3 scripts/planted-bugs.py            # all of them
-python3 scripts/planted-bugs.py readbit    # one, by name
+python3 scripts/planted-bugs.py              # every bug
+python3 scripts/planted-bugs.py readbit      # one of them
 ```
 
-There is at least one for each comparison: two builtins swapped in
-`DefaultFun`, `Data` byte strings cut into chunks of 63 bytes, a word reader
-that takes an eleventh group, a token quantity of 2^127 accepted, `case`
-branches reversed, a machine that computes an argument before its function or
-discharges a lambda's body from the wrong depth, six mistakes in the builtins,
-and a builtin given the wrong arity.
+There are fourteen, at least one for each comparison: swapped builtin tags,
+wrong `Data` chunking, a number reader that reads too far, a token quantity
+out of range, reversed `case` branches, two machine mistakes, six builtin
+mistakes, and a wrong arity. For each it prints `caught` and the families that reported it, or
+`MISSED`. It exits with status 1 if any bug is missed. Your checkout is never
+changed.
 
-## What it does not compare
+## What it does not check
 
-The other builtins, and `constr` and `case` at run time, which cardano-uplc's
-machine does not run yet. Nor the cost of evaluation: costing is outside
-cardano-uplc's scope.
+The builtins cardano-uplc's machine does not run yet, and `constr` and `case`
+at run time. Nor the cost of evaluation: costing is outside cardano-uplc's
+scope, so its machine has no budget.
 
 The reference is plutus-core 1.70.0.0, pinned with the package index in
-`cabal.project`. Moving the pin is how the comparison moves to a newer
+`cabal.project`. Moving that pin is how the comparison moves to a newer
 plutus-core.
