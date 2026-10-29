@@ -126,20 +126,23 @@ ten of each family's.
 
 ## Checking that it can fail
 
-A clean run means little unless the tool can fail. Put a known mistake into
-the cardano-uplc checkout and run again. Each of these is reported at 300
-cases:
+A clean run means little unless the tool can fail. `scripts/planted-bugs.py`
+copies the package files of the cardano-uplc checkout beside this one, plants
+a known mistake in the copy, runs the comparison against it, and says which families caught it.
+It does this for fourteen mistakes, one at a time, and exits with status 1 if
+any of them is missed:
 
-- two builtins swapped in `DefaultFun`'s declaration, so their tags swap the
-  same way in both directions: caught by comparing the decoded programs;
-- a `Data` byte-string writer that cuts chunks at 63 bytes instead of 64:
-  caught in the `Data` families and the flat ones that hold `data` constants;
-- a word reader that takes an eleventh group: caught in the padded naturals;
-- a quantity bound that lets 2^127 through: caught in the hand-built `value`
-  constants;
-- a machine that computes an argument before its function, or discharges a
-  returned lambda's body from depth 0 instead of 1: caught in the evaluation
-  family.
+```bash
+python3 scripts/planted-bugs.py            # all of them
+python3 scripts/planted-bugs.py readbit    # one, by name
+```
+
+There is at least one for each comparison: two builtins swapped in
+`DefaultFun`, `Data` byte strings cut into chunks of 63 bytes, a word reader
+that takes an eleventh group, a token quantity of 2^127 accepted, `case`
+branches reversed, a machine that computes an argument before its function or
+discharges a lambda's body from the wrong depth, six mistakes in the builtins,
+and a builtin given the wrong arity.
 
 ## What it does not compare
 
