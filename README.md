@@ -26,6 +26,15 @@ when they accept, on the value.
 **The ledger's `value` type.** Values from each side are written by both and
 read back by the other, and compared as values as well as bytes.
 
+**Evaluation.** Both CEK machines run the same term and must return the same
+term, or fail the same way with the same offending value. The terms use what
+cardano-uplc's machine runs so far: variables, lambdas, application, delay,
+force, constants and `error`, plus a few returned closures with `constr` and
+`case` in their bodies, never run. A term can loop for ever and cardano-uplc's
+machine has no budget, so plutus-core runs first, with one, and a term it does
+not finish is skipped. One looping term is always included, and the run fails
+if it is not skipped.
+
 For flat, when only plutus-core accepts an input, the refusal must be what
 cardano-uplc does not handle yet: builtins after tag 93. These are counted as
 known gaps, by builtin tag, and only when plutus-core's program really calls
@@ -50,17 +59,20 @@ hex. For `Data`, every one-sided acceptance is a disagreement.
 - **`Data` values and bytes**: generated values, each form of the writer at
   both sides of its boundary, inputs the reader must accept or refuse,
   including forms plutus-core never writes, and damaged encodings.
+- **Terms to evaluate**, generated with variables that mostly point at an
+  enclosing lambda and sometimes at index 0 or past them all, and with lambdas
+  often applied straight away, so bodies run with something bound.
 - **A corpus of real programs**, any directory of `.flat` files.
 
 ## Running it
 
 It needs GHC 9.6.7 and cabal. cardano-uplc is read from a checkout next to
 this one, so a comparison is always of the commit that checkout holds. It
-needs a cardano-uplc with the `Data` CBOR codec and the `value` type, which
-are on its `serialisation` branch:
+needs a cardano-uplc with the machine, `Cardano.UPLC.Machine`, which is on its
+`cek-machine` branch:
 
 ```bash
-git clone -b serialisation https://github.com/sandykwl/cardano-uplc.git
+git clone -b cek-machine https://github.com/sandykwl/cardano-uplc.git
 git clone <this repository> cardano-uplc-compare
 cd cardano-uplc-compare
 cabal update                          # the index is pinned to 2026-09-24
@@ -100,11 +112,15 @@ cases:
   caught in the `Data` families and the flat ones that hold `data` constants;
 - a word reader that takes an eleventh group: caught in the padded naturals;
 - a quantity bound that lets 2^127 through: caught in the hand-built `value`
-  constants.
+  constants;
+- a machine that computes an argument before its function, or discharges a
+  returned lambda's body from depth 0 instead of 1: caught in the evaluation
+  family.
 
 ## What it does not compare
 
-Evaluation. Both sides only read and write; nothing is run.
+Builtins, `constr` and `case` at run time, which cardano-uplc's machine does
+not run yet, and the cost of evaluation, which it does not count.
 
 The reference is plutus-core 1.70.0.0, pinned with the package index in
 `cabal.project`. Moving the pin is how the comparison moves to a newer

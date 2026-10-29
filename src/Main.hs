@@ -1,9 +1,10 @@
-{- | cardano-uplc's codecs against plutus-core's, on the same inputs.
+{- | cardano-uplc's codecs and machine against plutus-core's, on the same inputs.
 
 Both decoders read the same bytes and must agree on whether to accept them.
 When both accept, they must have read the same program, and re-encode it to
 the same bytes. When only plutus-core accepts, the refusal must be a known gap,
 something cardano-uplc does not handle yet; anything else is a failure.
+The machines are compared in "Eval", on terms rather than bytes.
 
 Usage:
   cardano-uplc-compare [CASES]       generated and hand-built inputs, CASES
@@ -40,6 +41,7 @@ import UntypedPlutusCore qualified as P
 import Bits
 import Cbor (cborReport)
 import Convert (fromPlutusProgram, lacksBuiltin)
+import Eval (evalReport)
 import Gen (Encodable (Encodable), Nested (Nested), genValue)
 import Value (valueCases, valueReport)
 
@@ -302,4 +304,5 @@ generated n = do
   okV <- valueReport n
   oks <- mapM (uncurry report) edgeCases
   okC <- cborReport n mutate
-  finish (and (ok1 : ok2 : ok3 : ok4 : ok5 : okV : okC : oks))
+  okE <- evalReport n
+  finish (and (ok1 : ok2 : ok3 : ok4 : ok5 : okV : okC : okE : oks))

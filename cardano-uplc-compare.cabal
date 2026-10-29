@@ -13,6 +13,7 @@ executable cardano-uplc-compare
     Bits
     Cbor
     Convert
+    Eval
     Gen
     Value
   default-language: GHC2021
